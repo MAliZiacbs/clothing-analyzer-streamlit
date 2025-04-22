@@ -28,47 +28,59 @@ DATABRICKS_API_TOKEN = st.secrets.get("DATABRICKS_API_TOKEN", os.getenv("DATABRI
 
 
 # ---- Helper Function 1: Call BLIP Captioning Endpoint ----
+# ---- Helper Function 1: Call BLIP Captioning Endpoint (REVISED PARSING) ----
 def call_blip_endpoint(image_bytes, blip_url, token):
     """
     Sends image bytes to the deployed BLIP captioning endpoint.
     Returns: (caption_string, error_string) - one will be None.
     """
-    # Basic validation of config values provided
+    # --- Config checks remain the same ---
     if not blip_url or "YOUR_BLIP_ENDPOINT_URL_HERE" in blip_url:
         return None, "BLIP Endpoint URL is not configured in Streamlit app/secrets."
     if not token or "YOUR_DATABRICKS_PAT_HERE" in token:
-        # Avoid leaking token existence in error messages for deployed apps
-        if os.getenv("STREAMLIT_IS_DEPLOYED"): # Simple check if running in Streamlit Cloud
+        if os.getenv("STREAMLIT_IS_DEPLOYED"):
              return None, "Databricks API Token is not configured correctly."
         else:
              return None, "Databricks API Token is not configured (check secrets/env vars/placeholders)."
 
-    print(f"Calling BLIP Endpoint: {blip_url}") # Print for server-side debugging (won't show in browser)
+    print(f"Calling BLIP Endpoint: {blip_url}") # Server-side log
     b64_image = base64.b64encode(image_bytes).decode('utf-8')
-    # Input format matching the signature defined for the BLIP model
     data_input = {"dataframe_split": {"columns": ["image_base64"], "data": [[b64_image]]}}
     headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
 
     try:
-        response = requests.post(blip_url, headers=headers, json=data_input, timeout=90) # 90 sec timeout
-        print(f"BLIP Endpoint Response Status: {response.status_code}") # Debugging
-        response.raise_for_status() # Check for HTTP errors (4xx, 5xx)
+        response = requests.post(blip_url, headers=headers, json=data_input, timeout=90)
+        print(f"BLIP Endpoint Response Status: {response.status_code}") # Server-side log
+        response.raise_for_status()
         result = response.json()
-        print(f"BLIP Raw Response Body: {result}") # Debugging
+        print(f"BLIP Raw Response Body: {result}") # Server-side log
 
-        # Extract prediction (should be a caption string)
+        # --- MODIFIED RESPONSE PARSING ---
         if 'predictions' in result and isinstance(result['predictions'], list) and len(result['predictions']) > 0:
-            caption = result['predictions'][0]
-            # Basic check if caption seems valid
-            if isinstance(caption, str) and len(caption) > 3 and "error" not in caption.lower():
-                print(f"BLIP Caption Received: '{caption}'")
+            prediction_item = result['predictions'][0] # Get the first item from the list
+
+            caption = None
+            # Check if it's the simple string format we initially expected
+            if isinstance(prediction_item, str):
+                caption = prediction_item
+            # **NEW:** Check if it's the dictionary format {'0': 'caption'}
+            elif isinstance(prediction_item, dict) and '0' in prediction_item and isinstance(prediction_item['0'], str):
+                caption = prediction_item['0'] # Extract the value associated with key '0'
+                print("Note: Parsed caption from dictionary format {'0': caption}") # Server-side log
+
+            # Validate the extracted caption (if any)
+            if caption and len(caption) > 3 and "error" not in caption.lower():
+                print(f"BLIP Caption Received: '{caption}'") # Server-side log
                 return caption, None # Success: return caption, no error
             else:
-                 error_msg = f"Received invalid caption or error message from BLIP endpoint: {caption}"
+                 # Handle cases where caption is None, too short, or an error string
+                 error_msg = f"Received invalid caption or error message from BLIP endpoint. Parsed value: {caption}. Original item: {prediction_item}"
                  print(error_msg)
                  return None, error_msg # Failure: return None, error message
+        # --- END MODIFIED PARSING ---
         else:
-            error_msg = f"Unexpected response format from BLIP endpoint (missing 'predictions'): {result}"
+            # Handle cases where 'predictions' key is missing or the list is empty
+            error_msg = f"Unexpected response format from BLIP endpoint (missing 'predictions' or empty list): {result}"
             print(error_msg)
             return None, error_msg # Failure: return None, error message
 
@@ -77,7 +89,6 @@ def call_blip_endpoint(image_bytes, blip_url, token):
          print(error_msg)
          return None, error_msg
     except requests.exceptions.RequestException as e:
-         # Try to get more specific error info
          error_detail = str(e)
          if e.response is not None:
               error_detail = f"Status {e.response.status_code}: {e.response.text[:200]}..."
